@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<meta name="theme-color" content="#ffffff" />
+<title>Open Problems</title>
+<style>
+  :root { --ink: #292e32; --muted: #626b70; --line: #dce2e4; --accent: #536d7b; --error: #9b3b3b;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink);
+    font-size: 17px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  body { margin: 0; background: #fff; }
+  main { max-width: 360px; margin: 18vh auto 0; padding: 0 16px; }
+  h1 { font-size: 1.6rem; font-weight: 650; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h1 span { color: var(--accent); }
+  p { color: var(--muted); margin: 0 0 1.5rem; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; min-width: 0; font: inherit; padding: 7px 11px; border: 1px solid var(--line); border-radius: 6px; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  button { font: inherit; padding: 7px 14px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #status { min-height: 1.6em; margin-top: .75rem; font-size: .9rem; }
+  #status.error { color: var(--error); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Open problems<span>.</span></h1>
+  <p>This collection is encrypted. Enter the password to read it.</p>
+  <form id="unlock">
+    <input id="password" type="password" autocomplete="current-password" aria-label="Password" placeholder="Password" required autofocus />
+    <button type="submit">Unlock</button>
+  </form>
+  <div id="status" role="status"></div>
+</main>
+<script type="module">
+const base = '/openproblems-site/';
+const form = document.getElementById('unlock');
+const status = document.getElementById('status');
+const show = (text, error = false) => { status.textContent = text; status.className = error ? 'error' : ''; };
+
+const supported = 'serviceWorker' in navigator && 'indexedDB' in window && crypto.subtle;
+const worker = supported ? navigator.serviceWorker.register(base + 'sw.js', { scope: base, updateViaCache: 'none' }) : null;
+if (!supported) {
+  show('This browser cannot open the encrypted site (service workers are unavailable, e.g. in private browsing).', true);
+  form.querySelector('button').disabled = true;
+}
+if (new URLSearchParams(location.search).has('lock')) {
+  history.replaceState(null, '', base);
+  show('Locked on this device.');
+}
+
+function database() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('openproblems-vault', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('keys');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function remember(key) {
+  const db = await database();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction('keys', 'readwrite');
+    transaction.objectStore('keys').put(key, 'site');
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = form.querySelector('button');
+  button.disabled = true;
+  show('Unlocking…');
+  try {
+    const params = await fetch(base + 'vault/params.json', { cache: 'no-cache' }).then((r) => r.json());
+    const salt = Uint8Array.from(atob(params.salt), (c) => c.charCodeAt(0));
+    const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(document.getElementById('password').value), 'PBKDF2', false, ['deriveKey']);
+    // Non-extractable: the stored key can decrypt, but cannot be read back out.
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: params.hash, salt, iterations: params.iterations },
+      material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const bytes = new Uint8Array(await fetch(base + 'vault/' + params.index + '.bin').then((r) => r.arrayBuffer()));
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.subarray(0, 12) }, key, bytes.subarray(12));
+    } catch {
+      show('Wrong password.', true);
+      button.disabled = false;
+      return;
+    }
+    await remember(key);
+    await worker;
+    const registration = await navigator.serviceWorker.ready;
+    registration.active.postMessage('reset');
+    location.reload();
+  } catch (error) {
+    show('Could not unlock: ' + error.message, true);
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
